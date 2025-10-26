@@ -6,4 +6,4 @@ venv/
 
 # Streamlit/SQLite Files to IGNORE
 users.db
-logistic_model.pkl
+
