@@ -134,9 +134,6 @@ def run_setup():
     with open(MODEL_FILE, 'wb') as file:
         pickle.dump(pipeline, file)
     
-    # NOTE: Accuracy check removed from this function to keep the logic clean, 
-    # but the model is saved and returned.
-    
     st.success("Model training complete!")
     return pipeline
 
@@ -300,4 +297,104 @@ def user_input_features():
         format_func=lambda x: {1: 'Normal', 2: 'Fixed Defect', 3: 'Reversible Defect'}[x]
     )
 
-    data = {'age': age, 'sex': sex, 'cp': cp, 'trestbps': trestbps, 'chol': chol, 'fbs': fbs, 'rest
+    # --- FIX APPLIED HERE ---
+    data = {
+        'age': age, 
+        'sex': sex, 
+        'cp': cp, 
+        'trestbps': trestbps, 
+        'chol': chol, 
+        'fbs': fbs, 
+        'restecg': restecg, 
+        'thalach': thalach, 
+        'exang': exang, 
+        'oldpeak': oldpeak, 
+        'slope': slope, 
+        'ca': ca, 
+        'thal': thal
+    }
+    # --- END FIX ---
+    
+    return pd.DataFrame(data, index=['Input Data'])
+
+# --- 6. MAIN PREDICTION LOGIC ---
+
+def heart_disease_predictor(model):
+    """The main body of the heart disease prediction app."""
+    st.title(f"Welcome, {st.session_state['name']}! Heart Disease Prediction 🩺")
+    
+    df_input = user_input_features()
+    
+    st.subheader('Patient Input Parameters')
+    st.dataframe(df_input)
+
+    if st.button('Predict Heart Disease Risk', type='primary'):
+        if model is None:
+            st.error("Cannot make prediction: Model is not trained or failed to load.")
+            return
+
+        input_array = df_input.iloc[0].values.reshape(1, -1)
+
+        try:
+            # The model is now a Pipeline, which handles scaling automatically
+            prediction = model.predict(input_array)
+            prediction_proba = model.predict_proba(input_array)
+            risk_percent = round(prediction_proba[0][1] * 100, 2)
+
+            st.markdown("---")
+            st.subheader('Prediction Result')
+
+            if prediction[0] == 1:
+                st.error(f"🚨 **HIGH RISK**")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
+                st.warning("Please consult your physician.")
+            else:
+                st.success(f"✅ **LOW RISK**")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
+                st.info("Maintaining a healthy lifestyle is always recommended.")
+            
+        except Exception as e:
+            st.error(f"Prediction Error: {e}")
+
+# --- 7. APPLICATION ENTRY POINT (FINAL STABLE ROUTER) ---
+
+if __name__ == '__main__':
+    
+    # 1. Run Setup/Load Model (This handles the model file check and training)
+    model = run_setup()
+    if model is None:
+        st.error("🛑 Cannot run application without a trained model.")
+        st.stop()
+
+    # 2. Get Database Connection (This handles the database file and table creation)
+    db = get_db()
+    if db is None:
+        st.stop()
+        
+    # 3. Application Router
+    
+    if st.session_state['logged_in']:
+        # Logged In View
+        with st.sidebar:
+            st.sidebar.title(f"User: {st.session_state['name']}")
+            if st.button("Logout", type='secondary'):
+                logout()
+        heart_disease_predictor(model)
+    else:
+        # Login/Registration View
+        st.title("Heart Disease Prediction System ❤️")
+        st.markdown("---")
+        
+        st.sidebar.title("Access Portal")
+        menu = st.sidebar.radio(
+            "Choose Action", 
+            ['Login', 'Register'], 
+            key='menu_selection_radio',
+            index=0 if st.session_state['menu_selection'] == 'Login' else 1
+        )
+        st.session_state['menu_selection'] = menu
+
+        if st.session_state['menu_selection'] == 'Login':
+            show_login_form()
+        elif st.session_state['menu_selection'] == 'Register':
+            show_registration_form()
