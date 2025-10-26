@@ -337,7 +337,33 @@ def heart_disease_predictor(model):
 
         try:
             # The model is now a Pipeline, which handles scaling automatically
-            prediction = model.predict(input_array)
+# In app_final.py, inside the heart_disease_predictor function
+
+# Get the probability for the positive class (1: Heart Disease)
+prediction_proba = model.predict_proba(input_array)
+risk_percent = round(prediction_proba[0][1] * 100, 2)
+
+# --- CRITICAL FIX: MANUALLY SET THE THRESHOLD ---
+# The default threshold is 0.5. Since SMOTE inflates probabilities, 
+# we lower the threshold to prioritize catching true positives (Recall).
+CLASSIFICATION_THRESHOLD = 0.35  # You can tune this (try 0.3 or 0.4)
+
+if prediction_proba[0][1] > CLASSIFICATION_THRESHOLD:
+    prediction_label = 1 # High Risk
+else:
+    prediction_label = 0 # Low Risk
+
+st.markdown("---")
+st.subheader('Prediction Result')
+
+if prediction_label == 1:
+    st.error(f"🚨 **HIGH RISK**")
+    st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
+    st.warning("Please consult your physician.")
+else:
+    st.success(f"✅ **LOW RISK**")
+    st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
+    st.info("Maintaining a healthy lifestyle is always recommended.")
             prediction_proba = model.predict_proba(input_array)
             risk_percent = round(prediction_proba[0][1] * 100, 2)
 
