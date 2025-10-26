@@ -5,8 +5,16 @@ import pickle
 import os
 import sqlite_utils
 import bcrypt
-import sqlite3 # Import needed for the thread-safe connection fix
+import sqlite3 
 from sqlite_utils.db import NotFoundError
+
+# NEW IMPORTS FOR SELF-CONTAINED MODEL SETUP
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import StandardScaler
+from imblearn.pipeline import Pipeline 
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 
@@ -16,9 +24,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# File names (Must match final_setup.py)
+# File names (Must match files in GitHub repo)
 MODEL_FILE = 'logistic_model.pkl'
 DB_PATH = 'users.db'
+DATA_FILE = 'heart.csv' # Added: Critical for self-training on cloud
 
 # Session State Initialization
 if 'logged_in' not in st.session_state:
@@ -28,39 +37,108 @@ if 'menu_selection' not in st.session_state:
 if 'name' not in st.session_state:
     st.session_state['name'] = None
 
-# --- 2. MODEL AND DATABASE ACCESS FUNCTIONS ---
+# --- 2. MODEL AND DATABASE ACCESS FUNCTIONS (SELF-SUFFICIENT SETUP) ---
 
-@st.cache_resource
-def load_model():
-    """Load the trained Logistic Regression model."""
-    if not os.path.exists(MODEL_FILE):
-        st.error(f"FATAL ERROR: Model file '{MODEL_FILE}' not found. Run 'python final_setup.py' first.")
-        return None
+def initialize_database(db):
+    """Ensures the 'patients' table exists."""
     try:
-        with open(MODEL_FILE, 'rb') as file:
-            model = pickle.load(file)
-        return model
+        # Create table if it does not exist
+        db["patients"].create({
+            "username": str,
+            "password_hash": str,
+            "name": str
+        }, pk="username", if_not_exists=True)
     except Exception as e:
-        st.error(f"FATAL ERROR loading model: {e}")
-        return None
+        # Handle cases where the table creation still fails
+        st.error(f"FATAL DB ERROR: Could not ensure 'patients' table exists: {e}")
+        return False
+    return True
 
 @st.cache_resource
 def get_db():
     """
-    Retrieves the database connection using sqlite3 to ensure check_same_thread=False 
-    is applied, resolving threading/stability issues.
+    Retrieves the database connection. Creates the DB file and table if missing.
+    CRITICAL: uses check_same_thread=False for Streamlit compatibility.
     """
-    if not os.path.exists(DB_PATH):
-        st.error(f"FATAL ERROR: Database file '{DB_PATH}' not found. Run 'python final_setup.py' first.")
-        return None
     try:
-        # CRITICAL FIX: Use sqlite3.connect with check_same_thread=False
+        # If the file doesn't exist, sqlite3.connect CREATES IT (solving the cloud issue).
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         db = sqlite_utils.Database(conn)
+        
+        # Ensure the table is created
+        if not initialize_database(db):
+            return None
+            
         return db
     except Exception as e:
         st.error(f"FATAL ERROR connecting to database: {e}")
         return None 
+
+
+@st.cache_resource(show_spinner="Training model on first run...")
+def run_setup():
+    """
+    Consolidated function to train the model and save it locally 
+    if it doesn't exist, making the app self-sufficient for deployment.
+    """
+    if os.path.exists(MODEL_FILE):
+        try:
+            with open(MODEL_FILE, 'rb') as file:
+                model = pickle.load(file)
+            return model
+        except Exception:
+            # If the file exists but is corrupted, we re-train
+            os.remove(MODEL_FILE) 
+
+    # --- MODEL TRAINING LOGIC (Adapted from final_setup.py) ---
+    st.info("Model file not found. Training robust model now (this may take a moment)...")
+    
+    # CRITICAL CHECK: Ensure data file is present on the cloud
+    if not os.path.exists(DATA_FILE):
+        st.error(f"❌ FATAL ERROR: Data file '{DATA_FILE}' not found. Ensure it's in your GitHub repo.")
+        st.stop()
+        
+    try:
+        df = pd.read_csv(DATA_FILE)
+    except Exception as e:
+        st.error(f"❌ FATAL ERROR reading {DATA_FILE}: {e}")
+        st.stop()
+        
+    FEATURES = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg', 
+                'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal']
+    TARGET = 'target'
+    
+    X = df[FEATURES].fillna(df[FEATURES].mean())
+    y = df[TARGET]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Define the Robust Pipeline
+    steps = [
+        ('scaler', StandardScaler()),                 # Step 1: Feature Scaling
+        ('smote', SMOTE(random_state=42)),           # Step 2: Data Balancing
+        ('logreg', LogisticRegression(
+            max_iter=5000, 
+            solver='liblinear', 
+            penalty='l2', 
+            C=0.5, 
+            random_state=42
+        ))                                           # Step 3: Regularized Model
+    ]
+    pipeline = Pipeline(steps=steps)
+
+    # Train the Pipeline
+    pipeline.fit(X_train, y_train)
+    
+    # Save the trained pipeline model
+    with open(MODEL_FILE, 'wb') as file:
+        pickle.dump(pipeline, file)
+    
+    # NOTE: Accuracy check removed from this function to keep the logic clean, 
+    # but the model is saved and returned.
+    
+    st.success("Model training complete!")
+    return pipeline
 
 # --- 3. USER AUTHENTICATION FUNCTIONS ---
 
@@ -222,82 +300,4 @@ def user_input_features():
         format_func=lambda x: {1: 'Normal', 2: 'Fixed Defect', 3: 'Reversible Defect'}[x]
     )
 
-    data = {'age': age, 'sex': sex, 'cp': cp, 'trestbps': trestbps, 'chol': chol, 'fbs': fbs, 'restecg': restecg, 'thalach': thalach, 'exang': exang, 'oldpeak': oldpeak, 'slope': slope, 'ca': ca, 'thal': thal}
-    return pd.DataFrame(data, index=['Input Data'])
-
-# --- 6. MAIN PREDICTION LOGIC ---
-
-def heart_disease_predictor(model):
-    """The main body of the heart disease prediction app."""
-    st.title(f"Welcome, {st.session_state['name']}! Heart Disease Prediction 🩺")
-    
-    df_input = user_input_features()
-    
-    st.subheader('Patient Input Parameters')
-    st.dataframe(df_input)
-
-    if st.button('Predict Heart Disease Risk', type='primary'):
-        if model is None:
-            st.error("Cannot make prediction: Model is not trained or failed to load.")
-            return
-
-        input_array = df_input.iloc[0].values.reshape(1, -1)
-
-        try:
-            prediction = model.predict(input_array)
-            prediction_proba = model.predict_proba(input_array)
-            risk_percent = round(prediction_proba[0][1] * 100, 2)
-
-            st.markdown("---")
-            st.subheader('Prediction Result')
-
-            if prediction[0] == 1:
-                st.error(f"🚨 **HIGH RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
-                st.warning("Please consult your physician.")
-            else:
-                st.success(f"✅ **LOW RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
-                st.info("Maintaining a healthy lifestyle is always recommended.")
-            
-        except Exception as e:
-            st.error(f"Prediction Error: {e}")
-
-# --- 7. APPLICATION ENTRY POINT (FINAL STABLE ROUTER) ---
-
-if __name__ == '__main__':
-    # Step 1: Check if setup files exist
-    if not os.path.exists(DB_PATH) or not os.path.exists(MODEL_FILE):
-        st.error("🛑 CRITICAL SETUP FILES MISSING. Please close the app and run 'python final_setup.py' first.")
-        st.stop()
-
-    model = load_model()
-
-    # Step 2: Main Application Router
-    
-    if st.session_state['logged_in']:
-        # If logged_in is TRUE, display the prediction app.
-        with st.sidebar:
-            st.sidebar.title(f"User: {st.session_state['name']}")
-            if st.button("Logout", type='secondary'):
-                logout()
-        heart_disease_predictor(model)
-    else:
-        # If logged_in is FALSE, display the access portal (Login/Register).
-        st.title("Heart Disease Prediction System ❤️")
-        st.markdown("---")
-        
-        st.sidebar.title("Access Portal")
-        # The menu selection widget is placed here
-        menu = st.sidebar.radio(
-            "Choose Action", 
-            ['Login', 'Register'], 
-            key='menu_selection_radio',
-            index=0 if st.session_state['menu_selection'] == 'Login' else 1
-        )
-        st.session_state['menu_selection'] = menu
-
-        if st.session_state['menu_selection'] == 'Login':
-            show_login_form()
-        elif st.session_state['menu_selection'] == 'Register':
-            show_registration_form()
+    data = {'age': age, 'sex': sex, 'cp': cp, 'trestbps': trestbps, 'chol': chol, 'fbs': fbs, 'rest
