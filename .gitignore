@@ -6,4 +6,3 @@ venv/
 
 # Streamlit/SQLite Files to IGNORE
 users.db
-
