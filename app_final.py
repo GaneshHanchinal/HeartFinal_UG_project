@@ -27,7 +27,7 @@ st.set_page_config(
 # File names (Must match files in GitHub repo)
 MODEL_FILE = 'logistic_model.pkl'
 DB_PATH = 'users.db'
-DATA_FILE = 'heart.csv' # Added: Critical for self-training on cloud
+DATA_FILE = 'heart.csv' 
 
 # Session State Initialization
 if 'logged_in' not in st.session_state:
@@ -49,7 +49,6 @@ def initialize_database(db):
             "name": str
         }, pk="username", if_not_exists=True)
     except Exception as e:
-        # Handle cases where the table creation still fails
         st.error(f"FATAL DB ERROR: Could not ensure 'patients' table exists: {e}")
         return False
     return True
@@ -61,7 +60,7 @@ def get_db():
     CRITICAL: uses check_same_thread=False for Streamlit compatibility.
     """
     try:
-        # If the file doesn't exist, sqlite3.connect CREATES IT (solving the cloud issue).
+        # If the file doesn't exist, sqlite3.connect CREATES IT.
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         db = sqlite_utils.Database(conn)
         
@@ -88,9 +87,11 @@ def run_setup():
             return model
         except Exception:
             # If the file exists but is corrupted, we re-train
-            os.remove(MODEL_FILE) 
+            st.warning("Existing model file corrupted. Retraining model now...")
+            if os.path.exists(MODEL_FILE):
+                os.remove(MODEL_FILE) 
 
-    # --- MODEL TRAINING LOGIC (Adapted from final_setup.py) ---
+    # --- MODEL TRAINING LOGIC ---
     st.info("Model file not found. Training robust model now (this may take a moment)...")
     
     # CRITICAL CHECK: Ensure data file is present on the cloud
@@ -158,7 +159,7 @@ def register_user(username, password, name):
         return False, "Database connection is unavailable."
 
     try:
-        # Robustly check if user exists (using list() for compatibility)
+        # Check if user exists
         existing_users = list(db.query(
             "SELECT username FROM patients WHERE username = :username", 
             {"username": username}
@@ -185,7 +186,7 @@ def verify_login(username, password):
         return False, None
         
     try:
-        # Robustly fetch user data (using list() for compatibility)
+        # Fetch user data
         user_data_list = list(db.query(
             "SELECT * FROM patients WHERE username = :username", 
             {"username": username}
@@ -297,7 +298,7 @@ def user_input_features():
         format_func=lambda x: {1: 'Normal', 2: 'Fixed Defect', 3: 'Reversible Defect'}[x]
     )
 
-    # --- FIX APPLIED HERE ---
+    # --- SYNTAX ERROR FIX: Correct dictionary formatting ---
     data = {
         'age': age, 
         'sex': sex, 
@@ -336,63 +337,46 @@ def heart_disease_predictor(model):
         input_array = df_input.iloc[0].values.reshape(1, -1)
 
         try:
-            # The model is now a Pipeline, which handles scaling automatically
-# In app_final.py, inside the heart_disease_predictor function
-
-# Get the probability for the positive class (1: Heart Disease)
-prediction_proba = model.predict_proba(input_array)
-risk_percent = round(prediction_proba[0][1] * 100, 2)
-
-# --- CRITICAL FIX: MANUALLY SET THE THRESHOLD ---
-# The default threshold is 0.5. Since SMOTE inflates probabilities, 
-# we lower the threshold to prioritize catching true positives (Recall).
-CLASSIFICATION_THRESHOLD = 0.35  # You can tune this (try 0.3 or 0.4)
-
-if prediction_proba[0][1] > CLASSIFICATION_THRESHOLD:
-    prediction_label = 1 # High Risk
-else:
-    prediction_label = 0 # Low Risk
-
-st.markdown("---")
-st.subheader('Prediction Result')
-
-if prediction_label == 1:
-    st.error(f"🚨 **HIGH RISK**")
-    st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
-    st.warning("Please consult your physician.")
-else:
-    st.success(f"✅ **LOW RISK**")
-    st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
-    st.info("Maintaining a healthy lifestyle is always recommended.")
+            # Get the probability for the positive class (1: Heart Disease)
             prediction_proba = model.predict_proba(input_array)
             risk_percent = round(prediction_proba[0][1] * 100, 2)
+            
+            # --- CRITICAL PREDICTION FIX: Manually lower threshold due to SMOTE bias ---
+            CLASSIFICATION_THRESHOLD = 0.35  # Threshold set to 0.35 (instead of default 0.5)
+
+            if prediction_proba[0][1] > CLASSIFICATION_THRESHOLD:
+                prediction_label = 1 # High Risk
+            else:
+                prediction_label = 0 # Low Risk
+            # --- END FIX ---
 
             st.markdown("---")
             st.subheader('Prediction Result')
 
-            if prediction[0] == 1:
+            if prediction_label == 1:
                 st.error(f"🚨 **HIGH RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
                 st.warning("Please consult your physician.")
             else:
                 st.success(f"✅ **LOW RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease.")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
                 st.info("Maintaining a healthy lifestyle is always recommended.")
             
         except Exception as e:
+            # The 'except' block is correctly aligned here (IndentationError fix)
             st.error(f"Prediction Error: {e}")
 
 # --- 7. APPLICATION ENTRY POINT (FINAL STABLE ROUTER) ---
 
 if __name__ == '__main__':
     
-    # 1. Run Setup/Load Model (This handles the model file check and training)
+    # 1. Run Setup/Load Model
     model = run_setup()
     if model is None:
         st.error("🛑 Cannot run application without a trained model.")
         st.stop()
 
-    # 2. Get Database Connection (This handles the database file and table creation)
+    # 2. Get Database Connection
     db = get_db()
     if db is None:
         st.stop()
