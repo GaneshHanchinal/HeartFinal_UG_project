@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# File names (Must match files in GitHub repo)
+# File names
 MODEL_FILE = 'logistic_model.pkl'
 DB_PATH = 'users.db'
 DATA_FILE = 'heart.csv' 
@@ -55,16 +55,11 @@ def initialize_database(db):
 
 @st.cache_resource
 def get_db():
-    """
-    Retrieves the database connection. Creates the DB file and table if missing.
-    CRITICAL: uses check_same_thread=False for Streamlit compatibility.
-    """
+    """Retrieves the database connection."""
     try:
-        # If the file doesn't exist, sqlite3.connect CREATES IT.
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         db = sqlite_utils.Database(conn)
         
-        # Ensure the table is created
         if not initialize_database(db):
             return None
             
@@ -76,17 +71,13 @@ def get_db():
 
 @st.cache_resource(show_spinner="Training model on first run...")
 def run_setup():
-    """
-    Consolidated function to train the model and save it locally 
-    if it doesn't exist, making the app self-sufficient for deployment.
-    """
+    """Consolidated function to train the model and save it locally."""
     if os.path.exists(MODEL_FILE):
         try:
             with open(MODEL_FILE, 'rb') as file:
                 model = pickle.load(file)
             return model
         except Exception:
-            # If the file exists but is corrupted, we re-train
             st.warning("Existing model file corrupted. Retraining model now...")
             if os.path.exists(MODEL_FILE):
                 os.remove(MODEL_FILE) 
@@ -94,9 +85,8 @@ def run_setup():
     # --- MODEL TRAINING LOGIC ---
     st.info("Model file not found. Training robust model now (this may take a moment)...")
     
-    # CRITICAL CHECK: Ensure data file is present on the cloud
     if not os.path.exists(DATA_FILE):
-        st.error(f"❌ FATAL ERROR: Data file '{DATA_FILE}' not found. Ensure it's in your GitHub repo.")
+        st.error(f"❌ FATAL ERROR: Data file '{DATA_FILE}' not found. Ensure it is in the project directory.")
         st.stop()
         
     try:
@@ -104,27 +94,61 @@ def run_setup():
     except Exception as e:
         st.error(f"❌ FATAL ERROR reading {DATA_FILE}: {e}")
         st.stop()
-        
-    FEATURES = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg', 
-                'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal']
-    TARGET = 'target'
     
-    X = df[FEATURES].fillna(df[FEATURES].mean())
-    y = df[TARGET]
+    # 1. DATA COERCION AND CLEANUP
+    st.info(f"Columns found in {DATA_FILE}: {list(df.columns)}")
+    for col in df.columns:
+        # Coerce all columns to numeric. Errors (like '?' or other non-numerics) become NaN.
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+    # Standard features identified from your data structure
+    FEATURES = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg', 
+                'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal'] 
+    TARGET = 'num' 
+    
+    # -------------------------------------------------------------
+    # CRITICAL FIXES FOR NaN VALUES
+    # -------------------------------------------------------------
+    
+    # a. Drop rows where the TARGET variable ('num') is NaN.
+    df = df.dropna(subset=[TARGET])
+    
+    # b. Binarize the target: Convert 0, 1, 2, 3, 4 to 0 (No Disease) or 1 (Disease).
+    y = df[TARGET].apply(lambda x: 1 if x > 0 else 0)
+    
+    # c. Create Feature Matrix X
+    X = df[FEATURES]
+    
+    # d. CRITICAL FIX: Drop columns that are all NaN after dropping rows. 
+    # This prevents fillna(X.mean()) from failing.
+    X = X.dropna(axis=1, how='all')
+    
+    # e. Reset FEATURES list to reflect any columns dropped above (like 'ca' or 'thal')
+    actual_features = list(X.columns)
+    
+    # f. Impute remaining missing values in FEATURES using the mean.
+    X = X.fillna(X.mean())
+    
+    # -------------------------------------------------------------
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+    # --- DIAGNOSTIC: Check training sample size ---
+    st.info(f"Training samples (total): {len(X_train)}")
+    st.info(f"Training samples (target=1, minority): {y_train.sum()}")
+    # --- END DIAGNOSTIC ---
+
     # Define the Robust Pipeline
     steps = [
-        ('scaler', StandardScaler()),                 # Step 1: Feature Scaling
-        ('smote', SMOTE(random_state=42)),           # Step 2: Data Balancing
+        ('scaler', StandardScaler()),                    
+        ('smote', SMOTE(random_state=42, k_neighbors=2)), 
         ('logreg', LogisticRegression(
             max_iter=5000, 
             solver='liblinear', 
             penalty='l2', 
             C=0.5, 
             random_state=42
-        ))                                           # Step 3: Regularized Model
+        ))                                           
     ]
     pipeline = Pipeline(steps=steps)
 
@@ -133,12 +157,14 @@ def run_setup():
     
     # Save the trained pipeline model
     with open(MODEL_FILE, 'wb') as file:
-        pickle.dump(pipeline, file)
+        # Save the model AND the final feature list to ensure prediction works correctly
+        pickle.dump((pipeline, actual_features), file)
     
     st.success("Model training complete!")
-    return pipeline
+    return (pipeline, actual_features)
 
-# --- 3. USER AUTHENTICATION FUNCTIONS ---
+
+# --- 3. USER AUTHENTICATION FUNCTIONS (UNCHANGED) ---
 
 def hash_password(password):
     """Hashes a password using bcrypt."""
@@ -159,7 +185,6 @@ def register_user(username, password, name):
         return False, "Database connection is unavailable."
 
     try:
-        # Check if user exists
         existing_users = list(db.query(
             "SELECT username FROM patients WHERE username = :username", 
             {"username": username}
@@ -186,7 +211,6 @@ def verify_login(username, password):
         return False, None
         
     try:
-        # Fetch user data
         user_data_list = list(db.query(
             "SELECT * FROM patients WHERE username = :username", 
             {"username": username}
@@ -208,7 +232,7 @@ def logout():
     st.info("Logged out successfully.")
     st.rerun()
 
-# --- 4. LOGIN/REGISTRATION FORM DISPLAY ---
+# --- 4. LOGIN/REGISTRATION FORM DISPLAY (UNCHANGED) ---
 
 def show_registration_form():
     """Displays the new user registration form."""
@@ -233,7 +257,7 @@ def show_registration_form():
                 success, message = register_user(new_username, new_password, new_name)
                 if success:
                     st.success(message)
-                    st.session_state['menu_selection'] = 'Login' # Switch to Login view
+                    st.session_state['menu_selection'] = 'Login' 
                     st.rerun()
                 else:
                     st.error(message)
@@ -252,118 +276,111 @@ def show_login_form():
             if success:
                 st.session_state['logged_in'] = True
                 st.session_state['name'] = user_name
-                st.session_state['menu_selection'] = 'Login' # Clean up state just before rerun
+                st.session_state['menu_selection'] = 'Login' 
                 st.success(f"Welcome, {user_name}!")
-                st.rerun() # Rerun to hit the 'logged_in' branch in the main router
+                st.rerun() 
             else:
                 st.error("Invalid Username or Password.")
 
-# --- 5. DATA INPUT WIDGETS ---
+# --- 5. DATA INPUT WIDGETS (UPDATED to accept dynamic feature list) ---
 
-def user_input_features():
-    """Collects all 13 necessary features from the user via the sidebar."""
+def user_input_features(feature_names):
+    """Collects features based on the list of features the model was trained on."""
     st.sidebar.header('Patient Clinical Data')
     st.sidebar.markdown('---')
-
-    age = st.sidebar.slider('Age (years)', 18, 100, 50)
-    sex = st.sidebar.selectbox('Sex', options=[1, 0], format_func=lambda x: 'Male (1)' if x == 1 else 'Female (0)')
-    cp = st.sidebar.selectbox(
-        'Chest Pain Type (cp)',
-        options=[0, 1, 2, 3],
-        format_func=lambda x: {0: 'Typical Angina', 1: 'Atypical Angina', 2: 'Non-Anginal Pain', 3: 'Asymptomatic'}[x]
-    )
-    st.sidebar.markdown('---')
-    trestbps = st.sidebar.number_input('Resting Blood Pressure (trestbps, mm Hg)', min_value=90, max_value=200, value=120, step=5)
-    chol = st.sidebar.number_input('Serum Cholesterol (chol, mg/dl)', min_value=120, max_value=500, value=240, step=5)
-    fbs = st.sidebar.selectbox('Fasting Blood Sugar > 120 mg/dl (fbs)', options=[0, 1], format_func=lambda x: 'True (1)' if x == 1 else 'False (0)')
-    restecg = st.sidebar.selectbox(
-        'Resting ECG Results (restecg)', 
-        options=[0, 1, 2],
-        format_func=lambda x: {0: 'Normal', 1: 'ST-T Wave Abnormality', 2: 'LV Hypertrophy'}[x]
-    )
-    st.sidebar.markdown('---')
-    thalach = st.sidebar.number_input('Max Heart Rate Achieved (thalach)', min_value=70, max_value=210, value=150, step=5)
-    exang = st.sidebar.selectbox('Exercise Induced Angina (exang)', options=[0, 1], format_func=lambda x: 'Yes (1)' if x == 1 else 'No (0)')
-    oldpeak = st.sidebar.number_input('ST Depression (oldpeak)', min_value=0.0, max_value=6.5, value=1.0, step=0.1)
-    slope = st.sidebar.selectbox(
-        'Peak Exercise ST Segment Slope (slope)', 
-        options=[0, 1, 2],
-        format_func=lambda x: {0: 'Upsloping', 1: 'Flat', 2: 'Downsloping'}[x]
-    )
-    st.sidebar.markdown('---')
-    ca = st.sidebar.slider('Number of Major Vessels Colored (ca)', 0, 3, 0)
-    thal = st.sidebar.selectbox(
-        'Thalium Stress Test Result (thal)', 
-        options=[1, 2, 3],
-        format_func=lambda x: {1: 'Normal', 2: 'Fixed Defect', 3: 'Reversible Defect'}[x]
-    )
-
-    # --- SYNTAX ERROR FIX: Correct dictionary formatting ---
-    data = {
-        'age': age, 
-        'sex': sex, 
-        'cp': cp, 
-        'trestbps': trestbps, 
-        'chol': chol, 
-        'fbs': fbs, 
-        'restecg': restecg, 
-        'thalach': thalach, 
-        'exang': exang, 
-        'oldpeak': oldpeak, 
-        'slope': slope, 
-        'ca': ca, 
-        'thal': thal
-    }
-    # --- END FIX ---
     
-    return pd.DataFrame(data, index=['Input Data'])
+    # Store all inputs temporarily
+    input_data = {}
+
+    # Define a consistent order and retrieve input using the correct names
+    # Only create widgets for features the model was trained on
+    
+    # Define mapping for all possible features
+    feature_widgets = {
+        'age': st.sidebar.slider('Age (years)', 18, 100, 50),
+        'sex': st.sidebar.selectbox('Sex', options=[1, 0], format_func=lambda x: 'Male (1)' if x == 1 else 'Female (0)'),
+        'cp': st.sidebar.selectbox(
+            'Chest Pain Type (cp)',
+            options=[0, 1, 2, 3],
+            format_func=lambda x: {0: 'Typical Angina', 1: 'Atypical Angina', 2: 'Non-Anginal Pain', 3: 'Asymptomatic'}[x]
+        ),
+        'trestbps': st.sidebar.number_input('Resting Blood Pressure (trestbps, mm Hg)', min_value=90, max_value=200, value=120, step=5),
+        'chol': st.sidebar.number_input('Serum Cholesterol (chol, mg/dl)', min_value=120, max_value=500, value=240, step=5),
+        'fbs': st.sidebar.selectbox('Fasting Blood Sugar > 120 mg/dl (fbs)', options=[0, 1], format_func=lambda x: 'True (1)' if x == 1 else 'False (0)'),
+        'restecg': st.sidebar.selectbox(
+            'Resting ECG Results (restecg)', 
+            options=[0, 1, 2],
+            format_func=lambda x: {0: 'Normal', 1: 'ST-T Wave Abnormality', 2: 'LV Hypertrophy'}[x]
+        ),
+        'thalach': st.sidebar.number_input('Max Heart Rate Achieved (thalach)', min_value=70, max_value=210, value=150, step=5),
+        'exang': st.sidebar.selectbox('Exercise Induced Angina (exang)', options=[0, 1], format_func=lambda x: 'Yes (1)' if x == 1 else 'No (0)'),
+        'oldpeak': st.sidebar.number_input('ST Depression (oldpeak)', min_value=0.0, max_value=6.5, value=1.0, step=0.1),
+        'slope': st.sidebar.selectbox(
+            'Peak Exercise ST Segment Slope (slope)', 
+            options=[0, 1, 2],
+            format_func=lambda x: {0: 'Upsloping', 1: 'Flat', 2: 'Downsloping'}[x]
+        ),
+        'ca': st.sidebar.slider('Number of Major Vessels Colored (ca)', 0, 3, 0),
+        'thal': st.sidebar.selectbox(
+            'Thalium Stress Test Result (thal)', 
+            options=[1, 2, 3],
+            format_func=lambda x: {1: 'Normal', 2: 'Fixed Defect', 3: 'Reversible Defect'}[x]
+        )
+    }
+
+    # Only include features the model was trained on
+    for feature in feature_names:
+        if feature in feature_widgets:
+            input_data[feature] = feature_widgets[feature]
+        # Note: If a feature used for training isn't in this dictionary, it will be skipped.
+        
+    return pd.DataFrame(input_data, index=['Input Data'])[[f for f in feature_names if f in input_data]] # Ensure correct column order
 
 # --- 6. MAIN PREDICTION LOGIC ---
 
-def heart_disease_predictor(model):
+def heart_disease_predictor(model_and_features):
     """The main body of the heart disease prediction app."""
     st.title(f"Welcome, {st.session_state['name']}! Heart Disease Prediction 🩺")
     
-    df_input = user_input_features()
+    pipeline, actual_features = model_and_features
+    
+    df_input = user_input_features(actual_features)
     
     st.subheader('Patient Input Parameters')
     st.dataframe(df_input)
 
     if st.button('Predict Heart Disease Risk', type='primary'):
-        if model is None:
+        if pipeline is None:
             st.error("Cannot make prediction: Model is not trained or failed to load.")
             return
 
+        # Ensure input data columns match the training order/subset
         input_array = df_input.iloc[0].values.reshape(1, -1)
 
         try:
-            # Get the probability for the positive class (1: Heart Disease)
-            prediction_proba = model.predict_proba(input_array)
+            prediction_proba = pipeline.predict_proba(input_array)
             risk_percent = round(prediction_proba[0][1] * 100, 2)
             
-            # --- CRITICAL PREDICTION FIX: Manually lower threshold due to SMOTE bias ---
-            CLASSIFICATION_THRESHOLD = 0.35  # Threshold set to 0.35 (instead of default 0.5)
+            CLASSIFICATION_THRESHOLD = 0.30 
 
             if prediction_proba[0][1] > CLASSIFICATION_THRESHOLD:
                 prediction_label = 1 # High Risk
             else:
                 prediction_label = 0 # Low Risk
-            # --- END FIX ---
 
             st.markdown("---")
             st.subheader('Prediction Result')
 
             if prediction_label == 1:
                 st.error(f"🚨 **HIGH RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using a conservative threshold of {CLASSIFICATION_THRESHOLD}).")
                 st.warning("Please consult your physician.")
             else:
                 st.success(f"✅ **LOW RISK**")
-                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using threshold of {CLASSIFICATION_THRESHOLD}).")
+                st.markdown(f"The model predicts a **{risk_percent}%** probability of having Heart Disease (using a conservative threshold of {CLASSIFICATION_THRESHOLD}).")
                 st.info("Maintaining a healthy lifestyle is always recommended.")
             
         except Exception as e:
-            # The 'except' block is correctly aligned here (IndentationError fix)
             st.error(f"Prediction Error: {e}")
 
 # --- 7. APPLICATION ENTRY POINT (FINAL STABLE ROUTER) ---
@@ -371,8 +388,10 @@ def heart_disease_predictor(model):
 if __name__ == '__main__':
     
     # 1. Run Setup/Load Model
-    model = run_setup()
-    if model is None:
+    # run_setup returns (pipeline, actual_features_list)
+    model_and_features = run_setup()
+    
+    if model_and_features is None:
         st.error("🛑 Cannot run application without a trained model.")
         st.stop()
 
@@ -389,7 +408,7 @@ if __name__ == '__main__':
             st.sidebar.title(f"User: {st.session_state['name']}")
             if st.button("Logout", type='secondary'):
                 logout()
-        heart_disease_predictor(model)
+        heart_disease_predictor(model_and_features)
     else:
         # Login/Registration View
         st.title("Heart Disease Prediction System ❤️")

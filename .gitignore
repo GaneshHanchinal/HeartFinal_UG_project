@@ -1,8 +1,7 @@
-# Python cache and environment
+# Python cache and temporary files
 __pycache__/
 *.pyc
-venv/
-.venv/
 
-# Streamlit/SQLite Files to IGNORE
-users.db
+# Project-specific files to ignore
+logistic_model.pkl  # The trained machine learning model
+users.db            # The local SQLite database for user accounts
